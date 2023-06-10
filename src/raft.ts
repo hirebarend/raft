@@ -4,6 +4,7 @@ import { Log } from './log';
 import { LogArrayHelper } from './log-array-helper';
 import { RequestVoteRequest } from './request-vote-request';
 import { RequestVoteResponse } from './request-vote-response';
+import { StateMachine } from './state-machine';
 
 export class Raft {
   // <PERSISTENT STATE>
@@ -45,7 +46,8 @@ export class Raft {
     ) => Promise<AppendEntriesResponse>,
     protected sendRequestVoteRequest: (
       requestVoteRequest: RequestVoteRequest
-    ) => Promise<Array<RequestVoteResponse>>
+    ) => Promise<Array<RequestVoteResponse>>,
+    protected stateMachine: StateMachine
   ) {
     setInterval(() => {
       this.applyToStateMachine();
@@ -95,10 +97,9 @@ export class Raft {
     this.updateCommitIndex();
   }
 
-  public applyToStateMachine(): void {
+  public async applyToStateMachine(): Promise<void> {
     for (let i = this.lastApplied + 1; i <= this.commitIndex; i++) {
-      // TODO: applyToStateMachine
-      const response = new Date().getTime();
+      const response = await this.stateMachine.apply(this.log[i].data);
 
       this.lastApplied = i;
 
@@ -107,7 +108,7 @@ export class Raft {
       for (const callback of callbacks) {
         callback.fn(null, response);
 
-        // TODO: clean up
+        this.callbacks.splice(this.callbacks.indexOf(callback), 1);
       }
     }
   }
