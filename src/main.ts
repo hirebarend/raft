@@ -1,6 +1,7 @@
 import { AppendEntriesRequest } from './append-entries-request';
 import { Raft } from './raft';
 import { RequestVoteRequest } from './request-vote-request';
+import { StateMachine } from './state-machine';
 
 (async () => {
   const arr = ['a', 'b', 'c', 'd', 'e'];
@@ -25,7 +26,8 @@ import { RequestVoteRequest } from './request-vote-request';
           return raft
             .filter((y) => y.id !== x)
             .map((y) => y.handleRequestVote(requestVoteRequest));
-        }
+        },
+        new StateMachine()
       )
     );
   }
