@@ -1,7 +1,3 @@
-export class StateMachine {
-  public async apply(command: any): Promise<any> {
-    return {
-      hello: 'world',
-    };
-  }
+export interface StateMachine {
+  apply(command: any): Promise<any>;
 }

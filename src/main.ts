@@ -1,103 +1,109 @@
+import * as uuid from 'uuid';
 import { AppendEntriesRequest } from './append-entries-request';
 import { Raft } from './raft';
+import { RaftTransport } from './raft-transport';
 import { RequestVoteRequest } from './request-vote-request';
 import { StateMachine } from './state-machine';
 
-(async () => {
-  const arr = ['a', 'b', 'c', 'd', 'e'];
+class KeyValueStoreStateMachine implements StateMachine {
+  protected dict: { [key: string]: string } = {};
 
-  const raft: Array<Raft> = [];
-
-  for (const x of arr) {
-    raft.push(
-      new Raft(
-        x,
-        arr,
-        async (id: string, appendEntriesRequest: AppendEntriesRequest) => {
-          const y = raft.find((y) => y.id === id);
-
-          if (!y) {
-            throw new Error();
-          }
-
-          return y.handleAppendEntriesRequest(appendEntriesRequest);
-        },
-        async (requestVoteRequest: RequestVoteRequest) => {
-          return raft
-            .filter((y) => y.id !== x)
-            .map((y) => y.handleRequestVote(requestVoteRequest));
-        },
-        new StateMachine()
-      )
-    );
-  }
-
-  for (const x of raft) {
-    setInterval(async () => {
-      await x.applyToStateMachine();
-    }, 1000);
-
-    cycle(50, 100, async () => {
-      await x.heartbeat();
-    });
-
-    cycle(100, 300, async () => {
-      if (!x.isLeader() && x.electionTimeout()) {
-        await x.toCandidate();
-      }
-    });
-
-    setInterval(async () => {
-      x.display();
-    }, 2000);
-  }
-
-  setInterval(async () => {
-    for (const x of raft) {
-      if (!x.isLeader()) {
-        continue;
-      }
-
-      console.log(await x.handleRequest({ hello: 'world' }));
+  public async apply(command: {
+    command: 'GET' | 'SET';
+    key: string;
+    value: string;
+  }): Promise<any> {
+    if (command.command === 'GET') {
+      return this.dict[command.value] || null;
     }
+
+    if (command.command === 'SET') {
+      this.dict[command.value] = command.value;
+
+      return 'OK';
+    }
+
+    return 'UNKNOWN';
+  }
+}
+
+const stateMachine: StateMachine = new KeyValueStoreStateMachine();
+
+const ids: Array<string> = [uuid.v4(), uuid.v4(), uuid.v4(), uuid.v4()];
+
+const rafts: Array<Raft> = [];
+
+const raftTransports: Array<RaftTransport> = [];
+
+for (const id of ids) {
+  raftTransports.push({
+    appendEntries: async (appendEntriesRequest: AppendEntriesRequest) => {
+      const raft: Raft | undefined = rafts.find((x: Raft) => x.id === id);
+
+      if (!raft) {
+        throw new Error();
+      }
+
+      return await raft.handleAppendEntriesRequest(appendEntriesRequest);
+    },
+    getId: () => {
+      return id;
+    },
+    requestVote: async (requestVoteRequest: RequestVoteRequest) => {
+      const raft: Raft | undefined = rafts.find((x: Raft) => x.id === id);
+
+      if (!raft) {
+        throw new Error();
+      }
+
+      return await raft.handleRequestVote(requestVoteRequest);
+    },
+  });
+}
+
+for (const id of ids) {
+  rafts.push(
+    new Raft(
+      id,
+      raftTransports.filter((x) => x.getId() !== id),
+      stateMachine,
+    ),
+  );
+}
+
+for (const raft of rafts) {
+  setInterval(async () => {
+    await raft.applyToStateMachine();
   }, 1000);
 
-  // setInterval(() => {
-  //   for (const x of raft) {
-  //     if (!x.isLeader()) {
-  //       continue;
-  //     }
+  cycle(50, 100, async () => {
+    await raft.heartbeat();
+  });
 
-  //     x.toFollower();
-  //   }
-  // }, 10000);
+  cycle(100, 300, async () => {
+    if (!raft.isLeader() && raft.electionTimeout()) {
+      await raft.toCandidate();
+    }
+  });
 
-  // await raft[0].toCandidate();
-
-  // await raft[1].toCandidate();
-
-  // await raft[1].handleRequest('hello world');
-  // await raft[1].handleRequest('foo bar');
-
-  // await raft[0].toCandidate();
-
-  // await raft[0].handleRequest('james smith');
-
-  // for (const x of raft) {
-  //   x.display();
-  // }
-})();
+  setInterval(async () => {
+    raft.display();
+  }, 2000);
+}
 
 async function cycle(
   min: number,
   max: number,
-  fn: () => Promise<void>
+  fn: () => Promise<void>,
 ): Promise<void> {
   while (true) {
     await new Promise((resolve) =>
-      setTimeout(async () => {
-        resolve(null);
-      }, Math.random() * (max - min) + min)
+      setTimeout(
+        async () => {
+          resolve(null);
+        },
+        Math.random() * (max - min) + min,
+      ),
     );
 
     await fn();

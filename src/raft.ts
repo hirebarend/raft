@@ -2,6 +2,7 @@ import { AppendEntriesRequest } from './append-entries-request';
 import { AppendEntriesResponse } from './append-entries-response';
 import { Log } from './log';
 import { LogArrayHelper } from './log-array-helper';
+import { RaftTransport } from './raft-transport';
 import { RequestVoteRequest } from './request-vote-request';
 import { RequestVoteResponse } from './request-vote-response';
 import { StateMachine } from './state-machine';
@@ -39,35 +40,26 @@ export class Raft {
 
   constructor(
     public id: string,
-    protected serverIds: Array<string>,
-    protected sendAppendEntriesRequest: (
-      id: string,
-      appendEntriesRequest: AppendEntriesRequest
-    ) => Promise<AppendEntriesResponse>,
-    protected sendRequestVoteRequest: (
-      requestVoteRequest: RequestVoteRequest
-    ) => Promise<Array<RequestVoteResponse>>,
-    protected stateMachine: StateMachine
-  ) {
-    setInterval(() => {
-      this.applyToStateMachine();
-    }, 1000);
-  }
+    protected raftTransports: Array<RaftTransport>,
+    protected stateMachine: StateMachine,
+  ) {}
 
   public display() {
     console.log(
-      `[${this.id}] state => ${this.state}, currentTerm: ${this.currentTerm}, [${this.log.length}]`
+      `[${this.id}] state => ${this.state}, currentTerm: ${this.currentTerm}, [${this.log.length}]`,
     );
   }
 
-  protected async appendEntries(id: string): Promise<void> {
+  protected async appendEntries(raftTransport: RaftTransport): Promise<void> {
+    const id: string = raftTransport.getId();
+
     if (LogArrayHelper.getLastIndex(this.log) < this.nextIndex[id]) {
       return;
     }
 
     const entries: Array<Log> = LogArrayHelper.slice(
       this.log,
-      this.nextIndex[id]
+      this.nextIndex[id],
     );
 
     const appendEntriesRequest: AppendEntriesRequest = {
@@ -80,18 +72,18 @@ export class Raft {
     };
 
     const appendEntriesResponse: AppendEntriesResponse =
-      await this.sendAppendEntriesRequest(id, appendEntriesRequest);
+      await raftTransport.appendEntries(appendEntriesRequest);
 
     if (!appendEntriesResponse.success) {
       this.nextIndex[id] -= 1;
 
-      return await this.appendEntries(id);
+      return await this.appendEntries(raftTransport);
     }
 
     this.matchIndex[id] = LogArrayHelper.getLastIndex(entries);
     this.nextIndex[id] = LogArrayHelper.getTerm(
       entries,
-      LogArrayHelper.getLastIndex(entries)
+      LogArrayHelper.getLastIndex(entries),
     );
 
     this.updateCommitIndex();
@@ -122,7 +114,7 @@ export class Raft {
   }
 
   public handleAppendEntriesRequest(
-    appendEntriesRequest: AppendEntriesRequest
+    appendEntriesRequest: AppendEntriesRequest,
   ): AppendEntriesResponse {
     this.lastAppendEntriesTimestamp = new Date().getTime();
 
@@ -173,7 +165,7 @@ export class Raft {
           ? appendEntriesRequest.entries[
               appendEntriesRequest.entries.length - 1
             ].index
-          : 0
+          : 0,
       );
     }
 
@@ -196,9 +188,11 @@ export class Raft {
 
     this.log.push(log);
 
-    for (const serverId of this.serverIds.filter((x) => x !== this.id)) {
-      await this.appendEntries(serverId);
-    }
+    await Promise.all(
+      this.raftTransports.map((raftTransport: RaftTransport) =>
+        this.appendEntries(raftTransport),
+      ),
+    );
 
     return await new Promise((resolve, reject) => {
       this.callbacks.push({
@@ -217,7 +211,7 @@ export class Raft {
   }
 
   public handleRequestVote(
-    requestVoteRequest: RequestVoteRequest
+    requestVoteRequest: RequestVoteRequest,
   ): RequestVoteResponse {
     if (requestVoteRequest.term < this.currentTerm) {
       return {
@@ -259,21 +253,20 @@ export class Raft {
       return;
     }
 
-    for (const serverId of this.serverIds.filter((x) => x !== this.id)) {
+    for (const raftTransport of this.raftTransports) {
+      const id: string = raftTransport.getId();
+
       const appendEntriesRequest: AppendEntriesRequest = {
         entries: [],
         leaderCommit: this.commitIndex,
         leaderId: this.id,
-        prevLogIndex: this.nextIndex[serverId] - 1,
-        prevLogTerm: LogArrayHelper.getTerm(
-          this.log,
-          this.nextIndex[serverId] - 1
-        ),
+        prevLogIndex: this.nextIndex[id] - 1,
+        prevLogTerm: LogArrayHelper.getTerm(this.log, this.nextIndex[id] - 1),
         term: this.currentTerm,
       };
 
       const appendEntriesResponse: AppendEntriesResponse =
-        await this.sendAppendEntriesRequest(serverId, appendEntriesRequest);
+        await raftTransport.appendEntries(appendEntriesRequest);
     }
   }
 
@@ -293,13 +286,16 @@ export class Raft {
       lastLogIndex: LogArrayHelper.getLastIndex(this.log),
       lastLogTerm: LogArrayHelper.getTerm(
         this.log,
-        LogArrayHelper.getLastIndex(this.log)
+        LogArrayHelper.getLastIndex(this.log),
       ),
       term: this.currentTerm,
     };
 
-    const requestVoteResponses: Array<RequestVoteResponse> =
-      await this.sendRequestVoteRequest(requestVoteRequest);
+    const requestVoteResponses: Array<RequestVoteResponse> = await Promise.all(
+      this.raftTransports.map((raftTransport: RaftTransport) =>
+        raftTransport.requestVote(requestVoteRequest),
+      ),
+    );
 
     for (const requestVoteResponse of requestVoteResponses) {
       if (requestVoteResponse.term > this.currentTerm) {
@@ -315,7 +311,7 @@ export class Raft {
 
     if (
       requestVoteResponses.filter((x) => x.voteGranted).length + 1 <
-      Math.floor(this.serverIds.length / 2) + 1
+      Math.floor((this.raftTransports.length + 1) / 2) + 1
     ) {
       return;
     }
@@ -334,17 +330,31 @@ export class Raft {
 
     this.votedFor = null;
 
-    this.matchIndex = this.serverIds.reduce((dict, x) => {
-      dict[x] = 0;
+    this.matchIndex = this.raftTransports.reduce(
+      (dict, raftTransport: RaftTransport) => {
+        const id: string = raftTransport.getId();
 
-      return dict;
-    }, {} as { [key: string]: number });
+        dict[id] = 0;
 
-    this.nextIndex = this.serverIds.reduce((dict, x) => {
-      dict[x] = LogArrayHelper.getLastIndex(this.log) + 1;
+        return dict;
+      },
+      {} as { [key: string]: number },
+    );
 
-      return dict;
-    }, {} as { [key: string]: number });
+    this.matchIndex[this.id] = 0;
+
+    this.nextIndex = this.raftTransports.reduce(
+      (dict, raftTransport: RaftTransport) => {
+        const id: string = raftTransport.getId();
+
+        dict[id] = LogArrayHelper.getLastIndex(this.log) + 1;
+
+        return dict;
+      },
+      {} as { [key: string]: number },
+    );
+
+    this.nextIndex[this.id] = LogArrayHelper.getLastIndex(this.log) + 1;
 
     await this.heartbeat();
   }
@@ -359,12 +369,12 @@ export class Raft {
       i <= LogArrayHelper.getLastIndex(this.log);
       i++
     ) {
-      const count: number = this.serverIds.filter(
-        (x) => this.matchIndex[x] >= i
+      const count: number = Object.keys(this.matchIndex).filter(
+        (key: string) => this.matchIndex[key] >= i,
       ).length;
 
       if (
-        count >= Math.floor(this.serverIds.length / 2) + 1 &&
+        count >= Math.floor((this.raftTransports.length + 1) / 2) + 1 &&
         this.log[i - 1].term === this.currentTerm
       ) {
         this.commitIndex = i;
