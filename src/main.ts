@@ -1,9 +1,12 @@
-import * as uuid from 'uuid';
+import axios from 'axios';
+import * as hapi from '@hapi/hapi';
 import { AppendEntriesRequest } from './append-entries-request';
 import { Raft } from './raft';
 import { RaftTransport } from './raft-transport';
 import { RequestVoteRequest } from './request-vote-request';
 import { StateMachine } from './state-machine';
+import { AppendEntriesResponse } from './append-entries-response';
+import { RequestVoteResponse } from './request-vote-response';
 
 class KeyValueStoreStateMachine implements StateMachine {
   protected dict: { [key: string]: string } = {};
@@ -27,69 +30,99 @@ class KeyValueStoreStateMachine implements StateMachine {
   }
 }
 
-const stateMachine: StateMachine = new KeyValueStoreStateMachine();
+export class HttpRaftTransport implements RaftTransport {
+  constructor(
+    protected host: string,
+    protected port: number,
+  ) {}
 
-const ids: Array<string> = [uuid.v4(), uuid.v4(), uuid.v4(), uuid.v4()];
+  public async appendEntries(
+    appendEntriesRequest: AppendEntriesRequest,
+  ): Promise<AppendEntriesResponse> {
+    const response = await axios.post(
+      `http://${this.host}:${this.port}/rpc/append-entries`,
+      appendEntriesRequest,
+    );
 
-const rafts: Array<Raft> = [];
+    return response.data;
+  }
 
-const raftTransports: Array<RaftTransport> = [];
+  public getId(): string {
+    return `${this.host}:${this.port}`;
+  }
 
-for (const id of ids) {
-  raftTransports.push({
-    appendEntries: async (appendEntriesRequest: AppendEntriesRequest) => {
-      const raft: Raft | undefined = rafts.find((x: Raft) => x.id === id);
+  public async requestVote(
+    requestVoteRequest: RequestVoteRequest,
+  ): Promise<RequestVoteResponse> {
+    const response = await axios.post(
+      `http://${this.host}:${this.port}/rpc/request-vote`,
+      requestVoteRequest,
+    );
 
-      if (!raft) {
-        throw new Error();
-      }
-
-      return await raft.handleAppendEntriesRequest(appendEntriesRequest);
-    },
-    getId: () => {
-      return id;
-    },
-    requestVote: async (requestVoteRequest: RequestVoteRequest) => {
-      const raft: Raft | undefined = rafts.find((x: Raft) => x.id === id);
-
-      if (!raft) {
-        throw new Error();
-      }
-
-      return await raft.handleRequestVote(requestVoteRequest);
-    },
-  });
+    return response.data;
+  }
 }
 
-for (const id of ids) {
-  rafts.push(
-    new Raft(
-      id,
-      raftTransports.filter((x) => x.getId() !== id),
+(async () => {
+  const ports = [8081, 8082, 8083];
+
+  for (const port of ports) {
+    const stateMachine: StateMachine = new KeyValueStoreStateMachine();
+
+    const raft = new Raft(
+      `127.0.0.1:${port}`,
+      ports
+        .filter((x) => x !== port)
+        .map((x) => new HttpRaftTransport('127.0.0.1', x)),
       stateMachine,
-    ),
-  );
-}
+    );
 
-for (const raft of rafts) {
-  setInterval(async () => {
-    await raft.applyToStateMachine();
-  }, 1000);
+    const server = hapi.server({
+      port,
+      host: '0.0.0.0',
+    });
 
-  cycle(50, 100, async () => {
-    await raft.heartbeat();
-  });
+    server.route({
+      method: 'POST',
+      path: '/rpc/append-entries',
+      handler: async (request, h) => {
+        return await raft.handleAppendEntriesRequest(request.payload as any);
+      },
+    });
 
-  cycle(100, 300, async () => {
-    if (!raft.isLeader() && raft.electionTimeout()) {
-      await raft.toCandidate();
-    }
-  });
+    server.route({
+      method: 'POST',
+      path: '/rpc/request-vote',
+      handler: async (request, h) => {
+        return await raft.handleRequestVote(request.payload as any);
+      },
+    });
 
-  setInterval(async () => {
-    raft.display();
-  }, 2000);
-}
+    await server.start();
+
+    console.log('Server running on %s', server.info.uri);
+
+    setTimeout(() => {
+      setInterval(async () => {
+        await raft.applyToStateMachine();
+      }, 1000);
+
+      cycle(50, 100, async () => {
+        await raft.heartbeat();
+      });
+
+      cycle(100, 300, async () => {
+        if (!raft.isLeader() && raft.electionTimeout()) {
+          await raft.toCandidate();
+        }
+      });
+
+      setInterval(async () => {
+        raft.display();
+      }, 2000);
+    }, 5000);
+  }
+})();
 
 async function cycle(
   min: number,

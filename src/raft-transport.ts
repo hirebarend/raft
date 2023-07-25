@@ -1,14 +1,16 @@
-import { AppendEntriesRequest } from "./append-entries-request";
-import { AppendEntriesResponse } from "./append-entries-response";
-import { RequestVoteRequest } from "./request-vote-request";
-import { RequestVoteResponse } from "./request-vote-response";
+import { AppendEntriesRequest } from './append-entries-request';
+import { AppendEntriesResponse } from './append-entries-response';
+import { RequestVoteRequest } from './request-vote-request';
+import { RequestVoteResponse } from './request-vote-response';
 
 export interface RaftTransport {
-    appendEntries(appendEntriesRequest: AppendEntriesRequest): Promise<AppendEntriesResponse>;
+  appendEntries(
+    appendEntriesRequest: AppendEntriesRequest,
+  ): Promise<AppendEntriesResponse>;
 
-    getId(): string;
+  getId(): string;
 
-    requestVote: (
-        requestVoteRequest: RequestVoteRequest
-      ) => Promise<RequestVoteResponse>
+  requestVote(
+    requestVoteRequest: RequestVoteRequest,
+  ): Promise<RequestVoteResponse>;
 }

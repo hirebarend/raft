@@ -222,6 +222,8 @@ export class Raft {
 
     if (requestVoteRequest.term > this.currentTerm) {
       this.currentTerm = requestVoteRequest.term;
+
+      this.toFollower(); // ??
     }
 
     if (this.votedFor && this.votedFor !== requestVoteRequest.candidateId) {
@@ -321,6 +323,8 @@ export class Raft {
 
   protected toFollower(): void {
     this.state = 'follower';
+
+    this.lastAppendEntriesTimestamp = new Date().getTime(); // ??
 
     this.votedFor = null;
   }
